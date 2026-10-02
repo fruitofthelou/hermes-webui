@@ -52,7 +52,7 @@ param(
     [string]$BindHost = ''
 )
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 $RepoRoot = Split-Path -Parent $PSCommandPath
 
 # === Load .env (mirroring start.sh's filtering) ========================
@@ -207,4 +207,4 @@ try {
 } finally {
     Pop-Location
 }
-exit $script:serverExitCode
+return $script:serverExitCode
