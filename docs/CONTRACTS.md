@@ -117,6 +117,10 @@ Proposed RFCs are review guardrails, not implementation authorization. Do not
 implement RFC fragments unless the task or tracking issue explicitly asks for
 that slice.
 
+- [`docs/architecture/voice-correction-admission.md`](architecture/voice-correction-admission.md):
+  implemented narrow non-I/O interactive correction admission, Stop dominance,
+  terminal slot settlement, and explicit unsupported native transport outcomes.
+
 ## UI, UX, and theme contracts
 
 - [`DESIGN.md`](../DESIGN.md): design tokens and the current calm-console

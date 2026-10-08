@@ -64,6 +64,16 @@ Session finalization still owns the session lock: the returned-error path alread
 holds it, while initial registration and the exception path acquire it. Do not
 reacquire this non-reentrant lock from a branch that already owns it.
 
+## Interactive correction admission
+
+For WebUI-created redirect-capable Agents, control-slot admission is non-I/O
+under the stream ownership edge; native interactive request workers observe the
+interrupt flag outside registry locks. Stop clears pending redirects before
+detach, and terminal settlement drains both redirect and Steer slots after
+closing admission. Unsupported transports fail explicitly. See
+[`voice-correction-admission.md`](../architecture/voice-correction-admission.md)
+for the narrow implemented contract change and limitations.
+
 ## Run-journal sequence publication
 
 Within one WebUI process, auto-numbered appends to the same journal allocate

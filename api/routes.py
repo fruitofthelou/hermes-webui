@@ -3365,6 +3365,48 @@ def _clear_stale_stream_state(session) -> bool:
     return True
 
 
+def _voice_task_outcome(events: list, *, malformed: int = 0) -> dict:
+    """Expose settled run evidence, never infer success from assistant prose.
+
+    This projection deliberately contains no provider message, tool payload, or
+    session content. Transport closure alone is not a successful task.
+    """
+    from api.run_journal import select_authoritative_terminal_event
+
+    terminal = select_authoritative_terminal_event(events)
+    outcome = {'status': 'unconfirmed', 'code': 'outcome_unconfirmed',
+               'stage': 'terminal_journal', 'event_id': None}
+    if malformed or not terminal:
+        return outcome
+    event = terminal.get('event')
+    payload = terminal.get('payload') or {}
+    if not isinstance(payload, dict):
+        return outcome
+    outcome['event_id'] = terminal.get('event_id')
+    if event in ('apperror', 'error'):
+        # Classify only structured failure payloads, never successful answer text.
+        from api.streaming import _classify_provider_error
+        code = _classify_provider_error(str(payload.get('message') or ''))['type']
+        known = {'quota_exhausted', 'rate_limit', 'auth_mismatch', 'credential_pool_empty',
+                 'model_not_found', 'policy_blocked', 'timeout', 'compression_exhausted',
+                 'compression_snapshot_stale', 'no_response', 'tool_limit_reached'}
+        if code == 'error' and payload.get('type') in known:
+            code = payload['type']
+        outcome.update(status='failed', code=code if code in known else 'backend_error')
+    elif event == 'cancel':
+        outcome.update(status='cancelled', code='cancelled')
+    elif event == 'done':
+        # A terminal snapshot can still carry an explicitly marked error reply.
+        session = payload.get('session') or {}
+        messages = session.get('messages', []) if isinstance(session, dict) else []
+        latest = next((m for m in reversed(messages) if isinstance(m, dict) and m.get('role') == 'assistant'), {})
+        if payload.get('error') or latest.get('_error') or latest.get('_interrupted') or latest.get('_tool_limit_reached'):
+            outcome.update(status='failed', code='backend_error')
+        else:
+            outcome.update(status='succeeded', code=None)
+    return outcome
+
+
 def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
     terminal = bool(summary.get("terminal"))
     terminal_state = summary.get("terminal_state")
@@ -15158,7 +15200,10 @@ def handle_get(handler, parsed) -> bool:
         if not _stream_id_visible_to_request_profile(handler, stream_id):
             return True
         active = stream_id in STREAMS
-        payload = {"active": active, "stream_id": stream_id, "replay_available": False}
+        payload = {"active": active, "stream_id": stream_id, "replay_available": False,
+                   "task_outcome": {"status": "running" if active else "unconfirmed",
+                                    "code": None if active else "outcome_unconfirmed",
+                                    "stage": "stream_status", "event_id": None}}
         try:
             journal = find_run_summary(stream_id) if stream_id else None
         except Exception:
@@ -15166,6 +15211,15 @@ def handle_get(handler, parsed) -> bool:
         if journal:
             payload["replay_available"] = True
             payload["journal"] = _run_journal_status_payload(journal, active=active)
+            if not active:
+                from api.run_journal import read_run_events
+                try:
+                    replay = read_run_events(journal["session_id"], stream_id)
+                    events = replay.get("events", [])
+                    payload["task_outcome"] = _voice_task_outcome(events, malformed=replay.get("malformed", 0))
+                    payload["unconsumed_steering"] = any(e.get("event") == "pending_steer_leftover" for e in events)
+                except Exception:
+                    logger.debug("Unable to project voice task outcome", exc_info=True)
         return j(handler, payload)
 
     if parsed.path == "/api/chat/cancel":

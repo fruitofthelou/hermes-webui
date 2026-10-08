@@ -1,0 +1,11 @@
+'use strict';
+const assert=require('node:assert/strict');
+const {createVoiceBridge}=require('./bridge.js');const {matchesDeliveryReceipt}=require('./app.js');
+(async()=>{let message;let n=0;const b=createVoiceBridge({target:()=>({sid:'A',profile:'default'}),sameTarget:()=>true,offer:()=>{},status:()=>{},attach:()=>{},wait:async()=>{},result:async()=>({sent:true}),api:async(p,o)=>{if(p==='/api/chat/start'){message=JSON.parse(o.body).message;n++;return {stream_id:'s'};}if(p.includes('stream/status'))return {active:false,stream_id:'s',task_outcome:{status:'succeeded'}};return {session:{model:'m',messages:n?[{role:'assistant',content:'answer'}]:[]}};}});
+b.remember('user','Check Brooklyn on Wednesday October 7 2026 at noon using a current source.');b.remember('user','Actually Atlanta instead.');b.offer('Atlanta instead','native-id');await b.confirm();assert.ok(message.includes('Wednesday October 7 2026 at noon'));assert.ok(message.includes('current source'));assert.ok(message.includes('Confirmed latest request: Atlanta instead'));
+const done=text=>({type:'turn.done',turn:{role:'assistant',transcript:text}});
+assert.equal(matchesDeliveryReceipt(done('Got it. Checking Atlanta instead.'),'Answer request-1'),false);
+assert.equal(matchesDeliveryReceipt(done('Answer request-2. Sunny.'),'Answer request-1'),false);
+assert.equal(matchesDeliveryReceipt(done('Answer request-1. Sunny.'),'Answer request-1'),true);
+console.log('PASS context forwarded for semantic interpretation; unrelated and wrong-request acknowledgements cannot complete delivery');
+})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -1114,11 +1114,14 @@ def _prewarm_skill_tool_modules():
 
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
 from api.agent_runtime import ensure_agent_runtime_current, get_ai_agent_class
+from api.voice_correction import (
+    admit_correction, claim_stop, correction_agent_class, drain_corrections,
+)
 
 
 # Eagerly attempt the import at startup, matching the pre-guard behavior. If
 # dependencies are not ready yet, _get_ai_agent() retries when a chat starts.
-AIAgent = get_ai_agent_class()
+AIAgent = correction_agent_class(get_ai_agent_class())
 
 
 def _get_ai_agent():
@@ -1133,7 +1136,7 @@ def _get_ai_agent():
     global AIAgent
     ensure_agent_runtime_current()
     if AIAgent is None:
-        AIAgent = get_ai_agent_class()
+        AIAgent = correction_agent_class(get_ai_agent_class())
     return AIAgent
 
 
@@ -2017,6 +2020,18 @@ def _classify_provider_error(
             'label': 'Authentication failed',
             'type': 'auth_mismatch',
             'hint': 'The selected model may not be supported by your configured provider or your API key is invalid. Run `hermes model` in your terminal to update credentials, then restart the WebUI.',
+        }
+    if any(token in _err_lower for token in ('blocked by guardrail', 'policy violation', 'content_policy_violation', 'content filter', 'content_filter', 'safety policy')):
+        return {
+            'label': 'Provider policy blocked the request',
+            'type': 'policy_blocked',
+            'hint': 'The provider rejected this request under its policy. No automatic retry was attempted.',
+        }
+    if any(token in _err_lower for token in ('timed out', 'timeout', 'deadline exceeded')) or (exc is not None and isinstance(exc, TimeoutError)):
+        return {
+            'label': 'Provider timed out',
+            'type': 'timeout',
+            'hint': 'The provider did not complete the request in time. Inspect chat before retrying.',
         }
     if _is_not_found:
         return {
@@ -10977,8 +10992,8 @@ def _run_agent_streaming(
                 update_active_run(stream_id, phase="finalizing")
         leftovers = list(_returned_pending_steer)
         try:
-            drain = getattr(target, '_drain_pending_steer', None)
-            text = drain() if callable(drain) else None
+            # Adapter drains _drain_pending_steer plus the native redirect slot.
+            text = drain_corrections(target)
             if text:
                 leftovers.append(str(text))
         except Exception:
@@ -15293,14 +15308,14 @@ def _steer_bound_stream(sid: str, stream_id: str, text: str) -> dict | None:
             return {"accepted": False, "fallback": "stream_dead", "stream_id": None}
         if not callable(getattr(agent, "steer", None)):
             return {"accepted": False, "fallback": "agent_lacks_steer", "stream_id": None}
-        # steer() only stashes input; serializing it with stream teardown keeps
-        # cancel from detaching the selected worker before delivery.
+        # Admission mutates native control slots only; model workers perform
+        # request-scoped cancellation outside registry locks.
         try:
-            accepted = bool(agent.steer(text))
+            accepted, fallback = admit_correction(agent, text)
         except Exception:
             logger.debug("Stream-bound steer failed for session %s", sid, exc_info=True)
             return {"accepted": False, "fallback": "steer_error", "stream_id": stream_id}
-        return {"accepted": accepted, "fallback": None, "stream_id": stream_id}
+        return {"accepted": accepted, "fallback": fallback, "stream_id": stream_id}
 
 
 def _handle_chat_steer(handler, body: dict) -> bool:
@@ -15311,14 +15326,14 @@ def _handle_chat_steer(handler, body: dict) -> bool:
         and worker ownership; use the cache only for legacy cache-only runs.
       - Verify a stream is currently active for this session.
       - Never evict or close an agent while delivering steering input.
-      - Call agent.steer(text) — thread-safe, stashes text in
-        _pending_steer for application at the next tool-result boundary.
+      - Admit corrections through the WebUI adapter with no registry-lock I/O.
+        Active interactive model requests redirect; tools retain safe Steer.
 
     The agent's loop calls _apply_pending_steer_to_tool_results() at the
     end of every tool batch and appends the steer text to the last tool
-    result's content with a marker, so the model sees the steer as part
-    of the tool output on its next iteration. The user's stream is NOT
-    interrupted.
+    result's content with a marker. During an interactive model request the
+    native redirect consumer rebuilds the same logical turn instead. Unsupported
+    transports return immediate_redirect_unsupported without downgrade.
 
     If no agent is cached, the agent is too old to support steer, or no
     stream is active, return {"accepted": False, "fallback": "<reason>"}.
@@ -15406,9 +15421,9 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     # liveness/ownership revalidation and the enqueue must share the same
     # stream-ownership edge as Stop (STREAMS_LOCK -> ACTIVE_RUNS_LOCK). A Stop
     # that claims cancellation between an unlocked check and agent.steer()
-    # would strand guidance this response still reports as accepted. steer()
-    # only stashes input; interrupt, persistence, and HTTP writes stay outside
-    # the lock, and the cached agent is never evicted or closed here.
+    # would strand guidance this response still reports as accepted. Adapter
+    # admission only mutates native slots; interrupt, persistence, and HTTP
+    # writes stay outside the lock; the cached agent is never evicted or closed.
     #
     # Ownership must be proven positively, not merely unrefuted: BOTH the
     # stream owner AND the active-run session must equal the requesting
@@ -15439,13 +15454,13 @@ def _handle_chat_steer(handler, body: dict) -> bool:
                 elif (backend == WEBUI_LOCAL_CHAT_BACKEND
                       and run.get("phase") in _LOCAL_STEERABLE_PHASES):
                     try:
-                        accepted = bool(agent.steer(text))
+                        accepted, fallback = admit_correction(agent, text)
                     except Exception as exc:
                         logger.debug("agent.steer() raised for session=%s: %s", sid, exc)
                         result = {"accepted": False, "fallback": "steer_error",
                                   "stream_id": active_stream_id}
                     else:
-                        result = {"accepted": accepted, "fallback": None,
+                        result = {"accepted": accepted, "fallback": fallback,
                                   "stream_id": active_stream_id}
 
     return j(handler, result)
@@ -15559,6 +15574,16 @@ def cancel_stream(stream_id: str) -> bool:
         # health polling sees during that detached window. Stamp cancelled_at so
         # _clear_stale_stream_state() can eventually reclaim the session if the
         # worker is stuck in C-level I/O and never reaches its finally (#6623).
+        # Publish native redirect cancellation before any outside-lock abort.
+        # Cache-only workers need the same edge, using the verified run owner.
+        _control_agent = _snap_agent
+        if _control_agent is None and active_run_session_id:
+            with _live_config.SESSION_AGENT_CACHE_LOCK:
+                _control_cached = _live_config.SESSION_AGENT_CACHE.get(active_run_session_id)
+                if (_control_cached and _cached_agent_matches_session(
+                        _control_cached[0], active_run_session_id)):
+                    _control_agent = _control_cached[0]
+        claim_stop(_control_agent)
         update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
 
         # Stop and Steer share STREAMS_LOCK -> ACTIVE_RUNS_LOCK ordering.

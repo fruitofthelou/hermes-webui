@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# Private local diagnostics are never release source.
+diagnostic-trace*.jsonl

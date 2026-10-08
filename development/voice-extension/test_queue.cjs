@@ -1,0 +1,7 @@
+'use strict';const assert=require('node:assert/strict');const {createVoiceBridge}=require('./bridge.js');
+async function run(stop){let release;const gate=new Promise(r=>release=r);let posts=[],answers=[],views=[];let first=true;let sid='A';
+const b=createVoiceBridge({target:()=>({sid,profile:'default'}),sameTarget:t=>t.sid===sid,offer:()=>{},status:()=>{},queue:s=>views.push(s),attach:()=>{},wait:async()=>{if(first){first=false;await gate;}},result:t=>{answers.push(t);return {sent:true};},api:async(p,o)=>{if(p==='/api/chat/start'){posts.push(JSON.parse(o.body).message);return {stream_id:'x'};}if(p.includes('stream/status'))return {active:false,stream_id:'x',task_outcome:{status:'succeeded'}};return {session:{model:'m',model_provider:'p',messages:Array.from({length:posts.length},()=>({role:'assistant',content:'answer'}))}};}});
+b.offer('one');const work=b.confirm();await new Promise(r=>setImmediate(r));b.offer('two');await b.confirm();assert.equal(posts.length,1);assert.equal(views.at(-1).waiting.length,1);if(stop)b.reset();release();await work;
+assert.equal(posts.length,stop?1:2);assert.ok(posts[0].includes('Confirmed latest request: one'));if(!stop)assert.ok(posts[1].includes('Confirmed latest request: two'));assert.equal(answers.length,stop?0:2);
+}
+(async()=>{await run(false);await run(true);console.log('PASS FIFO confirmed requests, no parallel runs, Stop clears unstarted work and detaches answer');})().catch(e=>{console.error(e);process.exitCode=1;});

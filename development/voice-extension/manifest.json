@@ -1,0 +1,1 @@
+{"extensions":[{"id":"subscription-voice","name":"Subscription Live Voice (Experimental)","scripts":["panel.js","bridge.js","app.js"],"stylesheets":["voice.css"],"sidecar":{"type":"loopback","origin":"http://127.0.0.1:8767","health_path":"/health","proxy_auth":"token-v1"}}]}
