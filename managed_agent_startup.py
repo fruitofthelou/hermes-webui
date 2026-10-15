@@ -29,6 +29,10 @@ def activate_managed_agent() -> None:
             sys.path.insert(1, agent_dir)
         try:
             importlib.import_module("hermes_bootstrap")
+            # Bootstrap may relaunch under the managed interpreter. Publish only
+            # after successful activation so children use the actual runtime,
+            # not a stale launcher override. SystemExit still propagates below.
+            os.environ["HERMES_WEBUI_PYTHON"] = sys.executable
         except Exception as exc:  # noqa: BLE001 - SystemExit (relaunch/repair exit) still propagates
             # A broken Agent must not stop WebUI from starting: before this hook the
             # Agent import was lazy and an ImportError only disabled chat, leaving the
