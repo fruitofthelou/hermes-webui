@@ -25880,15 +25880,40 @@ def start_session_turn(
     # background task before its first human turn has an empty s.model, and
     # without the profile defaults the resolver would fall back to the global
     # DEFAULT_MODEL instead of the profile's configured default (greptile flag).
-    _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
-    model, model_provider, normalized_model = _resolve_compatible_session_model_state(
-        requested_model,
-        requested_provider,
-        profile_provider=_pp_provider,
-        profile_default_model=_pp_default,
-        profile_config=_pp_cfg,
-        prefer_cached_catalog=True,
+    #
+    # CUSTOMIZATION (wakeup keeps the session model; upstream report #8096):
+    # this runs on a bare drain/delegation thread with NO request-profile
+    # context, so without a scope the catalog lookup resolves the DEFAULT
+    # profile and a named-profile session's provider-qualified pick (e.g.
+    # "@anthropic:claude-opus-5-5") can be swapped for the default profile's
+    # default model -- silently moving the chat to another provider. Mirror the
+    # streaming worker (api/streaming.py, #5979 block):
+    #   A. resolve inside the session's own profile scope;
+    #   B. honour a deliberate pick recorded in model_explicit_pick_signature
+    #      (a later model/provider change yields a different signature, so a
+    #      stale pick still gets normal repair).
+    from api import profiles as _wakeup_profiles_api
+    from api.models import model_explicit_pick_signature as _wakeup_pick_sig
+
+    _wakeup_picked_sig = getattr(s, "model_explicit_pick_signature", None)
+    _wakeup_explicit_pick = bool(_wakeup_picked_sig) and _wakeup_picked_sig == _wakeup_pick_sig(
+        requested_model, requested_provider
     )
+    with _wakeup_profiles_api.profile_scope_for_detached_worker(
+        getattr(s, "profile", None),
+        "process_wakeup model resolution",
+        logger_override=logger,
+    ):
+        _pp_provider, _pp_default, _pp_cfg = _read_profile_model_config(s, requested_provider)
+        model, model_provider, normalized_model = _resolve_compatible_session_model_state(
+            requested_model,
+            requested_provider,
+            profile_provider=_pp_provider,
+            profile_default_model=_pp_default,
+            profile_config=_pp_cfg,
+            explicit_model_pick=_wakeup_explicit_pick,
+            prefer_cached_catalog=True,
+        )
     _paused_wakeup_response = None
     with _get_session_agent_lock(s.session_id):
         try:
