@@ -1182,22 +1182,25 @@ function _micToastKeyForRecognitionError(error){
     }
   }
 
-  // Gate continuous dictation to MOBILE so desktop stays one-shot (single
-  // utterance). An explicit hermes-mic-continuous flag wins in both directions,
-  // mirroring the hermes-voice-continuous pattern: 'true' opts a desktop in,
-  // 'false' opts a mobile out. Absent a flag, coarse-pointer (touch) devices get
-  // continuity and everything else stays single-utterance.
+  // Decide whether composer dictation keeps listening through natural pauses.
+  // An explicit hermes-mic-continuous flag wins in both directions, mirroring
+  // the hermes-voice-continuous pattern: 'true' opts in, 'false' opts out.
+  // CUSTOMIZATION (continuous-dictation default): absent a flag, dictation is
+  // continuous on EVERY device. Upstream #5915 kept desktop one-shot and only
+  // touch (coarse-pointer) devices continuous; this fork defaults it on so a
+  // thinking pause never ends a desktop dictation. Set the flag to 'false' to
+  // restore single-utterance dictation in a browser.
   function _micDictationContinuous(){
     try{
       const flag=localStorage.getItem('hermes-mic-continuous');
       if(flag==='true') return true;
       if(flag==='false') return false;
     }catch(_){}
-    try{ return window.matchMedia('(pointer:coarse)').matches; }catch(_){ return false; }
+    return true;
   }
 
   // Only auto-restart the composer-mic session on a natural pause: continuity
-  // must be enabled (mobile/opt-in), the session must still be active speech,
+  // must be enabled (default; 'false' opts out), the session must still be active speech,
   // the stop must not have been requested, and we must be under the restart cap.
   function _micShouldRestartDictation(){
     return _micDictationContinuous()
@@ -1279,8 +1282,8 @@ function _micToastKeyForRecognitionError(error){
   function _ensureSpeechRecognition(){
     if(!SpeechRecognition) return null;
     const sr=recognition||new SpeechRecognition();
-    // Desktop dictation stays one-shot (single utterance); mobile / opt-in
-    // devices run continuous so a natural pause doesn't end the session (#5294).
+    // Dictation runs continuous by default (customization) so a natural pause
+    // doesn't end the session (#5294); the 'false' opt-out keeps it one-shot.
     sr.continuous=_micDictationContinuous();
     sr.interimResults=true;
     sr.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
@@ -1314,9 +1317,9 @@ function _micToastKeyForRecognitionError(error){
         : ta.value;
       ta.value=committed;
       autoResize();
-      // Mobile / opt-in continuity: a natural pause ends this recognition run but
-      // the user is still dictating, so restart to keep the session alive. Desktop
-      // (one-shot) and intentional stops (_speechStopRequested) skip this and
+      // Continuity (default on): a natural pause ends this recognition run but
+      // the user is still dictating, so restart to keep the session alive. The
+      // opt-out (one-shot) and intentional stops (_speechStopRequested) skip this and
       // finalize. Bounded by _micMaxRestarts so a stolen audio session can't loop.
       if(_micShouldRestartDictation()){
         _prefix=committed&&!committed.endsWith(' ')&&!committed.endsWith('\n')
@@ -1348,7 +1351,7 @@ function _micToastKeyForRecognitionError(error){
     sr.onerror=(event)=>{
       // While dictating with continuity on, a no-speech/aborted error is a normal
       // pause or transient audio-session hiccup — swallow it and let onend restart
-      // (bounded by _micMaxRestarts). Desktop one-shot still surfaces the toast.
+      // (bounded by _micMaxRestarts). The one-shot opt-out still surfaces the toast.
       if((event.error==='no-speech'||event.error==='aborted')
           && _micDictationContinuous()
           && window._micActive
@@ -1463,7 +1466,7 @@ function _micToastKeyForRecognitionError(error){
       _speechStopRequested=false;
       _micRestartCount=0;
       // Refresh continuity gate at start so a settings/orientation change takes
-      // effect for this session (desktop stays one-shot, mobile stays continuous).
+      // effect for this session (continuous by default; 'false' opts out).
       recognition.continuous=_micDictationContinuous();
       recognition.lang=(typeof _locale!=='undefined'&&_locale._speech)||'en-US';
       recognition.start();
